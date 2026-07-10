@@ -61,7 +61,7 @@ def _(mo, textwrap):
     - **4. Distributed sink bank**: replace one extreme sink with several causally valid routing positions.
     - **5. Scale test**: repeat the extension from SmolLM2-135M through Qwen2.5-1.5B.
 
-    Optional probes later test dummy prefixes and alternative sink locations.
+    Optional deep dives later group the head inspector and prompt-time sink probes.
     """
         )
     )
@@ -774,16 +774,16 @@ def _(
                 ),
             ]
         )
-    accelerator_view
+    mo.accordion({"GPU runtime and benchmark": accelerator_view})
     return
 
 
 @app.cell
 def _(mo, textwrap):
-    mo.md(
+    _metric_definitions = mo.md(
         textwrap.dedent(
             """
-    ## Metric definitions
+    ### Metric definitions
 
     - `sink_mass_to_pos0`: average attention from later tokens to position 0.
     - `prev_token_mass`: average attention to the immediately previous token.
@@ -795,6 +795,7 @@ def _(mo, textwrap):
     """
         )
     )
+    mo.accordion({"Metric definitions": _metric_definitions})
     return
 
 
@@ -1708,7 +1709,7 @@ def _(metrics_df, mo):
         )
         sink_table_view = mo.vstack(
             [
-                mo.md("## Detailed sink heads"),
+                mo.md("### Head ranking"),
                 mo.md(
                     """
     - Each row is one layer/head pair.
@@ -1721,9 +1722,8 @@ def _(metrics_df, mo):
             ]
         )
     else:
-        sink_table_view = mo.md("## Detailed sink heads\n\nRun the model to populate this table.")
-    sink_table_view
-    return
+        sink_table_view = mo.md("### Head ranking\n\nRun the model to populate this table.")
+    return (sink_table_view,)
 
 
 @app.cell
@@ -1741,7 +1741,7 @@ def _(metrics_df, mo, plt):
         _fig.tight_layout()
         sink_heatmap_view = mo.vstack(
             [
-                mo.md("## Detailed sink map"),
+                mo.md("### Layer-head sink map"),
                 mo.md(
                     """
     - Rows: layers.
@@ -1755,8 +1755,7 @@ def _(metrics_df, mo, plt):
         )
     else:
         sink_heatmap_view = mo.md("No sink heatmap yet.")
-    sink_heatmap_view
-    return
+    return (sink_heatmap_view,)
 
 
 @app.cell
@@ -1770,10 +1769,7 @@ def _(
     np,
     token_limit,
 ):
-    mo.stop(
-        not experiment_ready,
-        mo.md("## Optional probe A: prompt-time sink candidates\n\nRun the selected experiment first."),
-    )
+    mo.stop(not experiment_ready)
 
     def mean_sink_for_prompt(prompt):
         import torch
@@ -1808,7 +1804,7 @@ def _(
                 _takeaway = "Prefix reduced `sink_mass_to_pos0`."
             intervention_view = mo.vstack(
                 [
-                    mo.md("## Optional probe A: prompt-time sink candidates"),
+                    mo.md("### Probe A: prompt-time sink candidates"),
                     mo.callout(
                         f"Mean `sink_mass_to_pos0` {direction} by {abs(delta):.4f} "
                         f"({clean_score:.4f} -> {prefixed_score:.4f}). {_takeaway}",
@@ -1827,7 +1823,7 @@ def _(
     else:
         intervention_view = mo.md(
             """
-    ## Optional probe A: prompt-time sink candidates
+    ### Probe A: prompt-time sink candidates
 
     - Set **Dummy prefix tokens** above 0.
     - This adds the ordinary text `<sink>` before the real prompt; it is not a learned special token.
@@ -1836,8 +1832,7 @@ def _(
     - Model-building angle: future architectures could expose explicit no-op or routing tokens instead of relying on accidental first-token sinks.
     """
         )
-    intervention_view
-    return
+    return (intervention_view,)
 
 
 @app.cell
@@ -1853,10 +1848,7 @@ def _(
     sink_scan_width,
     token_limit,
 ):
-    mo.stop(
-        not experiment_ready,
-        mo.md("## Optional probe B: can a prompt create a new sink?\n\nRun the selected experiment first."),
-    )
+    mo.stop(not experiment_ready)
 
     def _early_position_profile(prompt):
         import torch
@@ -1946,7 +1938,7 @@ def _(
             )
         alternate_sink_view = mo.vstack(
             [
-                mo.md("## Optional probe B: can a prompt create a new sink?"),
+                mo.md("### Probe B: can a prompt create a new sink?"),
                 mo.md(
                     """
     - Research question: is position `0` uniquely special, or can newer early positions become sink targets?
@@ -1965,8 +1957,7 @@ def _(
             f"Alternative sink-location scan could not run: `{type(exc).__name__}: {exc}`",
             kind="warn",
         )
-    alternate_sink_view
-    return
+    return (alternate_sink_view,)
 
 
 @app.cell
@@ -1993,7 +1984,7 @@ def _(active_head, active_layer, attentions, mo, np, plt, tokens):
         _fig.tight_layout()
         key_mass_view = mo.vstack(
             [
-                mo.md("## Selected head: key-position summary"),
+                mo.md("### Selected head: key-position summary"),
                 mo.md(
                     """
     - Collapses the full heatmap into one bar chart.
@@ -2007,9 +1998,8 @@ def _(active_head, active_layer, attentions, mo, np, plt, tokens):
             ]
         )
     else:
-        key_mass_view = mo.md("## Selected head: key-position summary\n\nLoad a model to see where the selected head sends attention.")
-    key_mass_view
-    return
+        key_mass_view = mo.md("### Selected head: key-position summary\n\nLoad a model to see where the selected head sends attention.")
+    return (key_mass_view,)
 
 
 @app.cell
@@ -2048,7 +2038,7 @@ def _(
         _fig.tight_layout()
         head_heatmap_view = mo.vstack(
             [
-                mo.md("## Selected head: full attention heatmap"),
+                mo.md("### Selected head: full attention heatmap"),
                 mo.md(
                     """
     - Rows: query tokens, the tokens asking where to attend.
@@ -2063,8 +2053,7 @@ def _(
         )
     else:
         head_heatmap_view = mo.md("No attention matrix yet.")
-    head_heatmap_view
-    return
+    return (head_heatmap_view,)
 
 
 @app.cell
@@ -2080,7 +2069,7 @@ def _(attentions, mo, plt):
         _fig.tight_layout()
         layer_trend_view = mo.vstack(
             [
-                mo.md("## sink_mass_to_pos0 by layer"),
+                mo.md("### sink_mass_to_pos0 by layer"),
                 mo.md(
                     """
     - X-axis: layer depth.
@@ -2095,7 +2084,42 @@ def _(attentions, mo, plt):
         )
     else:
         layer_trend_view = mo.md("No layer trend yet.")
-    layer_trend_view
+    return (layer_trend_view,)
+
+
+@app.cell
+def _(
+    alternate_sink_view,
+    head_heatmap_view,
+    intervention_view,
+    key_mass_view,
+    layer_trend_view,
+    mo,
+    sink_heatmap_view,
+    sink_table_view,
+):
+    mo.vstack(
+        [
+            mo.md("## Optional deep dives"),
+            mo.md("Open these after the five core experiments when you want head-level evidence or prompt-time interventions."),
+            mo.accordion(
+                {
+                    "Head inspector": mo.vstack(
+                        [
+                            sink_table_view,
+                            sink_heatmap_view,
+                            key_mass_view,
+                            head_heatmap_view,
+                            layer_trend_view,
+                        ]
+                    ),
+                    "Prompt-time sink probes": mo.vstack(
+                        [intervention_view, alternate_sink_view]
+                    ),
+                }
+            ),
+        ]
+    )
     return
 
 
