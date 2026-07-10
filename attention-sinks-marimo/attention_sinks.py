@@ -160,7 +160,18 @@ def _(mo):
         label="Custom prompt",
         rows=5,
     )
-    perturb_replacement = mo.ui.text(value=" best", label="Perturb replacement token")
+    perturb_replacement = mo.ui.dropdown(
+        options=[
+            "color: blue",
+            "entity: Alice",
+            "number: 42",
+            "negation: never",
+            "unrelated noun: telescope",
+            "punctuation: !",
+        ],
+        value="unrelated noun: telescope",
+        label="Perturbation replacement",
+    )
     dummy_sink_tokens = mo.ui.slider(0, 12, value=0, step=1, label="Dummy prefix tokens")
     sink_scan_width = mo.ui.slider(4, 24, value=12, step=1, label="Early positions to scan")
     sink_bank_size = mo.ui.slider(2, 16, value=4, step=1, label="Distributed sink bank size")
@@ -225,7 +236,7 @@ def _(mo):
     - **Custom prompt**: text sent to the model when custom mode is on.
     - **Max tokens**: how much of the prompt the model sees.
     - **Sink threshold epsilon**: cutoff for counting a head as having an attention sink.
-    - **Perturb replacement token**: token text used to replace the selected source token in the perturbation experiment.
+    - **Perturbation replacement**: interpretable replacement category used for the selected source token. The notebook reports the exact model token inserted.
     - **Dummy prefix tokens**: artificial tokens added before the real prompt.
     - **Early positions to scan**: number of early token positions to inspect as possible sink locations.
     - **Distributed sink bank size**: number of early positions used in the attention-surgery sink-bank proxy.
@@ -879,13 +890,25 @@ def _(
             raise ValueError("Need at least three tokens for a meaningful perturbation comparison.")
 
         _source = min(max(1, perturb_ix.value), _seq_len - 1)
-        _replacement_ids = tokenizer.encode(perturb_replacement.value, add_special_tokens=False)
-        if not _replacement_ids:
-            _replacement_ids = tokenizer.encode(" best", add_special_tokens=False)
-        _replacement_id = int(_replacement_ids[0])
+        _original_id = int(_input_ids[0, _source])
+        _replacement_candidates = {
+            "color: blue": [" blue", " red", " green"],
+            "entity: Alice": [" Alice", " Bob", " John"],
+            "number: 42": [" 42", " 7", " 1"],
+            "negation: never": [" never", " not", " no"],
+            "unrelated noun: telescope": [" telescope", " chair", " cat"],
+            "punctuation: !": [" !", "?", "."],
+        }[perturb_replacement.value]
+        _replacement_id = None
+        for _candidate in _replacement_candidates:
+            _candidate_ids = tokenizer.encode(_candidate, add_special_tokens=False)
+            if len(_candidate_ids) == 1 and int(_candidate_ids[0]) != _original_id:
+                _replacement_id = int(_candidate_ids[0])
+                break
+        if _replacement_id is None:
+            raise ValueError("No single-token replacement was available for this tokenizer.")
 
         _perturbed_ids = _input_ids.clone()
-        _original_id = int(_perturbed_ids[0, _source])
         _perturbed_ids[0, _source] = _replacement_id
 
         _with_first_base = _run_final_hidden(_input_ids, _attention_mask, model)
@@ -994,7 +1017,8 @@ def _(
                 mo.md("## 2. Over-mixing under perturbation"),
                 mo.md(
                     f"""
-    - Perturbation: token `{_source}` changes from `{_short_token(_result['original_token'])}` to `{_short_token(_result['replacement_token'])}`.
+    - Perturbation choice: **{perturb_replacement.value}**.
+    - Exact model token: position `{_source}` changes from `{_short_token(_result['original_token'])}` to `{_short_token(_result['replacement_token'])}`.
     - With first token: run the original sequence and measure final hidden-state changes.
     - Remove first token: run the same comparison after deleting position `0`.
     - Mean spread away from the perturbed token: **{_with_spread:.4f}** with first token vs **{_without_spread:.4f}** without it.
