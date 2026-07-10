@@ -56,7 +56,7 @@ def _(mo, textwrap):
     ## Experiment map
 
     - **1. Attention sink**: find which layer/head sends attention to position `0`.
-    - **2. Perturbation**: change one token and compare spread with vs without the first token.
+    - **2. Rollout counterfactual**: trace one source token with vs without the position-0 route.
     - **3. Context length**: test whether longer visible context changes sink use and rollout spread.
     - **4. Distributed sink bank**: replace one extreme sink with several causally valid routing positions.
     - **5. Scale test**: repeat the extension from SmolLM2-135M through Qwen2.5-1.5B.
@@ -160,18 +160,6 @@ def _(mo):
         label="Custom prompt",
         rows=5,
     )
-    perturb_replacement = mo.ui.dropdown(
-        options=[
-            "color: blue",
-            "entity: Alice",
-            "number: 42",
-            "negation: never",
-            "unrelated noun: telescope",
-            "punctuation: !",
-        ],
-        value="unrelated noun: telescope",
-        label="Perturbation replacement",
-    )
     dummy_sink_tokens = mo.ui.slider(0, 12, value=0, step=1, label="Dummy prefix tokens")
     sink_scan_width = mo.ui.slider(4, 24, value=12, step=1, label="Early positions to scan")
     sink_bank_size = mo.ui.slider(2, 16, value=4, step=1, label="Distributed sink bank size")
@@ -189,7 +177,6 @@ def _(mo):
             mo.vstack([model_name, prompt_style, max_tokens, sink_threshold, use_custom_prompt, custom_prompt]),
             mo.vstack(
                 [
-                    perturb_replacement,
                     dummy_sink_tokens,
                     sink_scan_width,
                     sink_bank_size,
@@ -213,7 +200,6 @@ def _(mo):
         dummy_sink_tokens,
         max_tokens,
         model_name,
-        perturb_replacement,
         prompt_style,
         run_accelerator_benchmark,
         run_context_sweep,
@@ -236,7 +222,6 @@ def _(mo):
     - **Custom prompt**: text sent to the model when custom mode is on.
     - **Max tokens**: how much of the prompt the model sees.
     - **Sink threshold epsilon**: cutoff for counting a head as having an attention sink.
-    - **Perturbation replacement**: interpretable replacement category used for the selected source token. The notebook reports the exact model token inserted.
     - **Dummy prefix tokens**: artificial tokens added before the real prompt.
     - **Early positions to scan**: number of early token positions to inspect as possible sink locations.
     - **Distributed sink bank size**: number of early positions used in the attention-surgery sink-bank proxy.
@@ -847,239 +832,6 @@ def _(metrics_df, mo, plt):
 
 
 @app.cell
-def _(
-    active_prompt,
-    experiment_ready,
-    load_causal_lm,
-    mo,
-    model_name,
-    np,
-    perturb_ix,
-    perturb_replacement,
-    plt,
-    token_limit,
-):
-    mo.stop(
-        not experiment_ready,
-        mo.md("## 2. Over-mixing under perturbation\n\nRun the selected experiment to start this analysis."),
-    )
-
-    def _run_final_hidden(input_ids, attention_mask, model, position_ids=None):
-        import torch
-
-        device = next(model.parameters()).device
-        _inputs = {
-            "input_ids": input_ids.to(device),
-            "attention_mask": attention_mask.to(device),
-        }
-        if position_ids is not None:
-            _inputs["position_ids"] = position_ids.to(device)
-        with torch.no_grad():
-            _outputs = model(**_inputs, output_hidden_states=True)
-        return _outputs.hidden_states[-1][0].float().detach().cpu().numpy()
-
-    def _perturbation_spread():
-        import torch
-
-        tokenizer, model = load_causal_lm(model_name.value)
-        _encoded = tokenizer(
-            active_prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=token_limit,
-        )
-        _input_ids = _encoded["input_ids"]
-        _attention_mask = _encoded["attention_mask"]
-        _seq_len = int(_input_ids.shape[-1])
-        if _seq_len < 3:
-            raise ValueError("Need at least three tokens for a meaningful perturbation comparison.")
-
-        _source = min(max(2, perturb_ix.value), _seq_len - 1)
-        _original_id = int(_input_ids[0, _source])
-        _replacement_candidates = {
-            "color: blue": [" blue", " red", " green"],
-            "entity: Alice": [" Alice", " Bob", " John"],
-            "number: 42": [" 42", " 7", " 1"],
-            "negation: never": [" never", " not", " no"],
-            "unrelated noun: telescope": [" telescope", " chair", " cat"],
-            "punctuation: !": [" !", "?", "."],
-        }[perturb_replacement.value]
-        _replacement_id = None
-        for _candidate in _replacement_candidates:
-            _candidate_ids = tokenizer.encode(_candidate, add_special_tokens=False)
-            if len(_candidate_ids) == 1 and int(_candidate_ids[0]) != _original_id:
-                _replacement_id = int(_candidate_ids[0])
-                break
-        if _replacement_id is None:
-            raise ValueError("No single-token replacement was available for this tokenizer.")
-
-        _perturbed_ids = _input_ids.clone()
-        _perturbed_ids[0, _source] = _replacement_id
-
-        _original_positions = torch.arange(_seq_len, dtype=torch.long).unsqueeze(0)
-        _with_first_base = _run_final_hidden(
-            _input_ids,
-            _attention_mask,
-            model,
-            _original_positions,
-        )
-        _with_first_perturbed = _run_final_hidden(
-            _perturbed_ids,
-            _attention_mask,
-            model,
-            _original_positions,
-        )
-        _with_first_delta = np.linalg.norm(_with_first_perturbed - _with_first_base, axis=-1)
-
-        _without_first_ids = _input_ids[:, 1:].clone()
-        _without_first_mask = _attention_mask[:, 1:].clone()
-        _without_first_positions = torch.arange(1, _seq_len, dtype=torch.long).unsqueeze(0)
-        _without_first_perturbed_ids = _without_first_ids.clone()
-        _without_source = _source - 1
-        _without_first_perturbed_ids[0, _without_source] = _replacement_id
-        _without_first_base = _run_final_hidden(
-            _without_first_ids,
-            _without_first_mask,
-            model,
-            _without_first_positions,
-        )
-        _without_first_perturbed = _run_final_hidden(
-            _without_first_perturbed_ids,
-            _without_first_mask,
-            model,
-            _without_first_positions,
-        )
-        _without_first_delta = np.linalg.norm(_without_first_perturbed - _without_first_base, axis=-1)
-
-        _tokens = tokenizer.convert_ids_to_tokens(_input_ids[0].detach().cpu().tolist())
-        _replacement_token = tokenizer.convert_ids_to_tokens([_replacement_id])[0]
-        _original_token = tokenizer.convert_ids_to_tokens([_original_id])[0]
-        return {
-            "source": _source,
-            "without_source": _without_source,
-            "tokens": _tokens,
-            "original_token": _original_token,
-            "replacement_token": _replacement_token,
-            "with_first_delta": _with_first_delta,
-            "without_first_delta": _without_first_delta,
-        }
-
-    def _short_token(token, max_len=12):
-        _cleaned = token.replace("Ġ", "").replace("▁", "").replace("\n", "\\n")
-        return _cleaned if len(_cleaned) <= max_len else _cleaned[: max_len - 1] + "…"
-
-    try:
-        _result = _perturbation_spread()
-        _with_first_delta = _result["with_first_delta"]
-        _without_first_delta = _result["without_first_delta"]
-        _source = _result["source"]
-        _tokens = _result["tokens"]
-        _with_exclude = np.ones(len(_with_first_delta), dtype=bool)
-        _with_exclude[0] = False
-        _with_exclude[_source] = False
-        _without_exclude = np.ones(len(_without_first_delta), dtype=bool)
-        _without_exclude[_result["without_source"]] = False
-        _with_spread = float(_with_first_delta[_with_exclude].mean())
-        _without_spread = float(_without_first_delta[_without_exclude].mean())
-        _ratio = _without_spread / max(_with_spread, 1e-8)
-        if _ratio > 1.1:
-            _takeaway = "With token positions aligned, removing the first token makes the perturbation spread more."
-            _kind = "info"
-        elif _ratio < 0.9:
-            _takeaway = "With token positions aligned, removing the first token reduces perturbation spread in this run."
-            _kind = "neutral"
-        else:
-            _takeaway = "With token positions aligned, perturbation spread is similar with and without the first token."
-            _kind = "neutral"
-
-        _fig, _ax = plt.subplots(figsize=(10, 3.8))
-        _ax.plot(np.arange(len(_with_first_delta)), _with_first_delta, marker="o", label="with first token")
-        _ax.plot(
-            np.arange(1, len(_tokens)),
-            _without_first_delta,
-            marker="o",
-            label="remove first token; keep position IDs",
-        )
-        _ax.axvline(_source, color="#444444", linewidth=1, linestyle="--", alpha=0.7)
-        _ax.set_title("Section 2: final-layer change after one token perturbation")
-        _ax.set_xlabel("Token position in original prompt")
-        _ax.set_ylabel("Hidden-state change norm")
-        _tick_stride = max(1, len(_tokens) // 18)
-        _tick_positions = list(range(0, len(_tokens), _tick_stride))
-        _ax.set_xticks(_tick_positions)
-        _ax.set_xticklabels(
-            [f"{_ix}:{_short_token(_tokens[_ix])}" for _ix in _tick_positions],
-            rotation=45,
-            ha="right",
-            fontsize=8,
-        )
-        _ax.grid(alpha=0.25)
-        _ax.legend()
-        _fig.tight_layout()
-
-        _zoom_positions = np.arange(len(_with_first_delta))
-        _zoom_mask = np.ones(len(_with_first_delta), dtype=bool)
-        _zoom_mask[0] = False
-        _zoom_mask[_source] = False
-        _zoom_fig, _zoom_ax = plt.subplots(figsize=(10, 3.2))
-        _zoom_ax.plot(
-            _zoom_positions[_zoom_mask],
-            _with_first_delta[_zoom_mask],
-            marker="o",
-            label="with first token",
-        )
-        _without_positions = np.arange(1, len(_tokens))
-        _without_zoom_mask = np.ones(len(_without_first_delta), dtype=bool)
-        _without_zoom_mask[_result["without_source"]] = False
-        _zoom_ax.plot(
-            _without_positions[_without_zoom_mask],
-            _without_first_delta[_without_zoom_mask],
-            marker="o",
-            label="remove first token; keep position IDs",
-        )
-        _zoom_ax.set_title("Perturbation spread, excluding the changed token")
-        _zoom_ax.set_xlabel("Other token positions")
-        _zoom_ax.set_ylabel("Hidden-state change norm")
-        _zoom_ax.grid(alpha=0.25)
-        _zoom_ax.legend()
-        _zoom_fig.tight_layout()
-
-        perturbation_view = mo.vstack(
-            [
-                mo.md("## 2. Position-aligned first-token deletion"),
-                mo.md(
-                    f"""
-    - Perturbation choice: **{perturb_replacement.value}**.
-    - Exact model token: position `{_source}` changes from `{_short_token(_result['original_token'])}` to `{_short_token(_result['replacement_token'])}`.
-    - With first token: run the original sequence and measure final hidden-state changes.
-    - Remove first token: delete position `0`, but give every remaining token its original position ID.
-    - Mean spread away from the perturbed token: **{_with_spread:.4f}** with first token vs **{_without_spread:.4f}** without it.
-    """
-                ),
-                mo.callout(_takeaway, kind=_kind),
-                _fig,
-                _zoom_fig,
-                mo.md(
-                    """
-    - Why this matters: the paper argues that sinks reduce uncontrolled mixing.
-    - If the orange curve is higher across many positions, deleting the first-token sink lets the perturbation contaminate more representations.
-    - The zoomed plot removes the directly changed token so the spread to other tokens is easier to see.
-    - Position IDs are held fixed, and the source is constrained away from the first two positions.
-    - Caveat: deletion still changes sequence length and the causal graph. Section 2b isolates only the attention route with a fixed-length counterfactual.
-    """
-                ),
-            ]
-        )
-    except Exception as exc:
-        perturbation_view = mo.callout(
-            f"Perturbation experiment could not run: `{type(exc).__name__}: {exc}`",
-            kind="warn",
-        )
-    perturbation_view
-    return
-
-
-@app.cell
 def _(attentions, mo, np, perturb_ix, plt, tokens):
     def _rollout_from_attention_stack(attention_stack, remove_position0=False, residual_weight=0.5):
         _seq_len = attention_stack[0].shape[-1]
@@ -1144,7 +896,7 @@ def _(attentions, mo, np, perturb_ix, plt, tokens):
 
         overmixing_view = mo.vstack(
             [
-                mo.md("## 2b. Attention-rollout proxy"),
+                mo.md("## 2. Attention-rollout counterfactual"),
                 mo.md(
                     f"""
     - Paper question: if token `{_source}` changes slightly, how much can it change other token representations after all layers?
@@ -1165,7 +917,7 @@ def _(attentions, mo, np, perturb_ix, plt, tokens):
             ]
         )
     else:
-        overmixing_view = mo.md("## 2b. Attention-rollout proxy\n\nLoad a model to compare actual attention against a no-position-0 counterfactual.")
+        overmixing_view = mo.md("## 2. Attention-rollout counterfactual\n\nLoad a model to compare actual attention against a no-position-0 counterfactual.")
     overmixing_view
     return
 
