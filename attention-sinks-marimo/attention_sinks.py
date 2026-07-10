@@ -19,7 +19,6 @@ app = marimo.App(width="full")
 
 @app.cell
 def _():
-    import functools
     import math
     import textwrap
 
@@ -28,7 +27,7 @@ def _():
     import numpy as np
     import pandas as pd
 
-    return functools, mo, np, pd, plt, textwrap
+    return math, mo, np, pd, plt, textwrap
 
 
 @app.cell
@@ -238,20 +237,44 @@ def _(mo):
 
 
 @app.cell
-def _(functools):
-    @functools.lru_cache(maxsize=6)
+def _():
+    _model_cache = {}
+
     def load_causal_lm(name):
+        import gc
+
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        if name in _model_cache:
+            return _model_cache[name]
+
+        # Keep one checkpoint resident. This prevents model switching and the
+        # scaling sweep from accumulating several models on the accelerator.
+        for _, _old_model in _model_cache.values():
+            try:
+                _old_model.to("cpu")
+            except Exception:
+                pass
+        _model_cache.clear()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif (
+            hasattr(torch.backends, "mps")
+            and torch.backends.mps.is_available()
+            and hasattr(torch, "mps")
+            and hasattr(torch.mps, "empty_cache")
+        ):
+            torch.mps.empty_cache()
 
         tokenizer = AutoTokenizer.from_pretrained(name)
         _probe_ids = tokenizer("attention sink", add_special_tokens=False)["input_ids"]
         if not _probe_ids and name.startswith("Qwen/Qwen2.5-"):
             tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B")
-        kwargs = {}
+        kwargs = {"low_cpu_mem_usage": True}
         if torch.cuda.is_available():
             kwargs["torch_dtype"] = torch.float16
-            kwargs["device_map"] = "auto"
             target_device = "cuda"
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             kwargs["torch_dtype"] = torch.float32 if "Qwen2.5-1.5B" in name else torch.float16
@@ -266,10 +289,11 @@ def _(functools):
             )
         except TypeError:
             model = AutoModelForCausalLM.from_pretrained(name, **kwargs)
-        if not hasattr(model, "hf_device_map"):
-            model = model.to(target_device)
+        model = model.to(target_device)
+        model.config.use_cache = False
         model.eval()
-        return tokenizer, model
+        _model_cache[name] = (tokenizer, model)
+        return _model_cache[name]
 
     return (load_causal_lm,)
 
@@ -471,8 +495,15 @@ def _(
             attentions = []
             runtime_details = {}
             load_error = exc
+            _error_text = f"{type(load_error).__name__}: {load_error}"
+            _memory_hint = ""
+            if "out of memory" in _error_text.lower():
+                _memory_hint = (
+                    " Qwen 1.5B needs an accelerator with enough free memory; "
+                    "disable optional sweeps, lower Max tokens to 64, and run again."
+                )
             load_notice = mo.callout(
-                f"Model dependencies or weights are not available yet: `{type(load_error).__name__}: {load_error}`",
+                f"Model could not load: `{_error_text}`{_memory_hint}",
                 kind="warn",
             )
     experiment_ready = model is not None and bool(attentions)
