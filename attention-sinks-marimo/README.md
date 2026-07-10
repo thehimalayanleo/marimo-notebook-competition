@@ -17,6 +17,8 @@ marimo edit attention_sinks.py
 
 Default demo: `HuggingFaceTB/SmolLM2-135M`.
 
+Choose the model and prompt, then click **Run selected experiment**. Expensive model work is gated behind this button so the published app opens immediately.
+
 Fast smoke test: `sshleifer/tiny-gpt2`.
 
 Other small-model demos:

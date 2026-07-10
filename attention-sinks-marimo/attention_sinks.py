@@ -167,6 +167,12 @@ def _(mo):
     run_context_sweep = mo.ui.checkbox(value=False, label="Run context-length sweep")
     run_scaling_study = mo.ui.checkbox(value=False, label="Run 135M-1.5B scaling study")
     run_accelerator_benchmark = mo.ui.checkbox(value=False, label="Run accelerator benchmark")
+    run_experiment = mo.ui.run_button(
+        label="Run selected experiment",
+        kind="success",
+        full_width=True,
+        tooltip="Load the selected model and update every experiment below.",
+    )
     controls = mo.hstack(
         [
             mo.vstack([model_name, prompt_style, max_tokens, sink_threshold, use_custom_prompt, custom_prompt]),
@@ -184,7 +190,13 @@ def _(mo):
         ],
         gap=2,
     )
-    controls
+    mo.vstack(
+        [
+            controls,
+            mo.md("Choose the model and prompt first. Changing a setting pauses expensive computation until you run again."),
+            run_experiment,
+        ]
+    )
     return (
         custom_prompt,
         dummy_sink_tokens,
@@ -194,6 +206,7 @@ def _(mo):
         prompt_style,
         run_accelerator_benchmark,
         run_context_sweep,
+        run_experiment,
         run_scaling_study,
         sink_bank_size,
         sink_scan_width,
@@ -219,6 +232,7 @@ def _(mo):
     - **Run context-length sweep**: run extra forward passes at multiple token limits.
     - **Run 135M-1.5B scaling study**: run the same prompt and sink-bank intervention across two SmolLM sizes and two Qwen sizes.
     - **Run accelerator benchmark**: time repeated Transformer forward passes on the active device.
+    - **Run selected experiment**: load the chosen model and recompute the notebook after settings change.
     - **Layer**: one transformer block in the model.
     - **Head**: one attention sub-module inside a layer.
     - **Normalize heatmap**: rescales each row so each query token's strongest attention is easy to see.
@@ -387,6 +401,7 @@ def _(dummy_sink_tokens, mo, prompt_source):
             mo.md(
                 f"""
     - Current prompt: `{prompt_source}`.
+    - Click **Run selected experiment** after choosing the model and prompt.
     - Find heads with high `sink_mass_to_pos0`.
     - Set the layer/head sliders to inspect one head.
     - Heatmap: rows are query tokens, columns are key tokens.
@@ -399,56 +414,74 @@ def _(dummy_sink_tokens, mo, prompt_source):
 
 
 @app.cell
-def _(active_prompt, load_causal_lm, mo, model_name, token_limit):
-    try:
-        import torch
-
-        tokenizer, model = load_causal_lm(model_name.value)
-        encoded = tokenizer(
-            active_prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=token_limit,
-        )
-        device = next(model.parameters()).device
-        encoded = {key: value.to(device) for key, value in encoded.items()}
-        with torch.no_grad():
-            outputs = model(**encoded, output_attentions=True)
-        tokens = tokenizer.convert_ids_to_tokens(encoded["input_ids"][0].detach().cpu().tolist())
-        attentions = [attn[0].float().detach().cpu().numpy() for attn in outputs.attentions]
-        _first_param = next(model.parameters())
-        runtime_details = {
-            "device": str(device),
-            "dtype": str(_first_param.dtype).replace("torch.", ""),
-            "cuda_available": bool(torch.cuda.is_available()),
-            "mps_available": bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available()),
-            "accelerator_available": bool(
-                torch.cuda.is_available()
-                or (hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
-            ),
-            "tokens": int(encoded["input_ids"].shape[-1]),
-            "forward_passes": 1,
-        }
-        load_error = None
-    except Exception as exc:
+def _(
+    active_prompt,
+    load_causal_lm,
+    mo,
+    model_name,
+    run_experiment,
+    token_limit,
+):
+    if not run_experiment.value:
         tokenizer = None
         model = None
-        encoded = None
-        outputs = None
         tokens = []
         attentions = []
         runtime_details = {}
-        load_error = exc
-
-    if load_error is None:
-        load_notice = mo.md("")
-    else:
+        load_error = None
         load_notice = mo.callout(
-            f"Model dependencies or weights are not available yet: `{type(load_error).__name__}: {load_error}`",
-            kind="warn",
+            "Ready. Choose settings above, then click **Run selected experiment** to load the model.",
+            kind="info",
         )
+    else:
+        try:
+            import torch
+
+            tokenizer, model = load_causal_lm(model_name.value)
+            encoded = tokenizer(
+                active_prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=token_limit,
+            )
+            device = next(model.parameters()).device
+            encoded = {key: value.to(device) for key, value in encoded.items()}
+            with torch.no_grad():
+                outputs = model(**encoded, output_attentions=True)
+            tokens = tokenizer.convert_ids_to_tokens(encoded["input_ids"][0].detach().cpu().tolist())
+            attentions = [attn[0].float().detach().cpu().numpy() for attn in outputs.attentions]
+            _first_param = next(model.parameters())
+            runtime_details = {
+                "device": str(device),
+                "dtype": str(_first_param.dtype).replace("torch.", ""),
+                "cuda_available": bool(torch.cuda.is_available()),
+                "mps_available": bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available()),
+                "accelerator_available": bool(
+                    torch.cuda.is_available()
+                    or (hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+                ),
+                "tokens": int(encoded["input_ids"].shape[-1]),
+                "forward_passes": 1,
+            }
+            load_error = None
+            load_notice = mo.callout(
+                f"Experiment complete on `{device}` with {runtime_details['tokens']} tokens.",
+                kind="success",
+            )
+        except Exception as exc:
+            tokenizer = None
+            model = None
+            tokens = []
+            attentions = []
+            runtime_details = {}
+            load_error = exc
+            load_notice = mo.callout(
+                f"Model dependencies or weights are not available yet: `{type(load_error).__name__}: {load_error}`",
+                kind="warn",
+            )
+    experiment_ready = model is not None and bool(attentions)
     load_notice
-    return attentions, model, runtime_details, tokens
+    return attentions, experiment_ready, model, runtime_details, tokens
 
 
 @app.cell
@@ -650,6 +683,7 @@ def _(metrics_df, mo, runtime_details, sink_threshold, tokens):
 @app.cell
 def _(
     active_prompt,
+    experiment_ready,
     load_causal_lm,
     mo,
     model_name,
@@ -657,6 +691,10 @@ def _(
     runtime_details,
     token_limit,
 ):
+    mo.stop(
+        not experiment_ready,
+        mo.md("## Accelerator use\n\nRun the selected experiment first."),
+    )
     if run_accelerator_benchmark.value:
         try:
             import time as _time
@@ -796,6 +834,7 @@ def _(metrics_df, mo, plt):
 @app.cell
 def _(
     active_prompt,
+    experiment_ready,
     load_causal_lm,
     mo,
     model_name,
@@ -805,6 +844,11 @@ def _(
     plt,
     token_limit,
 ):
+    mo.stop(
+        not experiment_ready,
+        mo.md("## 2. Over-mixing under perturbation\n\nRun the selected experiment to start this analysis."),
+    )
+
     def _run_final_hidden(input_ids, attention_mask, model):
         import torch
 
@@ -1071,6 +1115,7 @@ def _(attentions, mo, np, perturb_ix, plt, tokens):
 @app.cell
 def _(
     clean_prompt,
+    experiment_ready,
     load_causal_lm,
     max_tokens,
     mo,
@@ -1081,6 +1126,11 @@ def _(
     run_context_sweep,
     sink_threshold,
 ):
+    mo.stop(
+        not experiment_ready,
+        mo.md("## 3. Context length and over-mixing\n\nRun the selected experiment first."),
+    )
+
     def _rollout_spread_for_stack(attention_stack, remove_position0=False):
         _seq_len = attention_stack[0].shape[-1]
         if _seq_len < 3:
@@ -1385,6 +1435,7 @@ def _(attentions, mo, np, pd, plt, sink_bank_size):
 @app.cell
 def _(
     clean_prompt,
+    experiment_ready,
     load_causal_lm,
     max_tokens,
     mo,
@@ -1486,7 +1537,7 @@ def _(
             "forward_seconds": _seconds,
         }
 
-    if run_scaling_study.value:
+    if run_scaling_study.value and experiment_ready:
         _suite = [
             ("HuggingFaceTB/SmolLM2-135M", "SmolLM2 135M"),
             ("HuggingFaceTB/SmolLM2-360M-Instruct", "SmolLM2 360M"),
@@ -1712,12 +1763,18 @@ def _(metrics_df, mo, plt):
 def _(
     clean_prompt,
     dummy_sink_tokens,
+    experiment_ready,
     load_causal_lm,
     mo,
     model_name,
     np,
     token_limit,
 ):
+    mo.stop(
+        not experiment_ready,
+        mo.md("## Optional probe A: prompt-time sink candidates\n\nRun the selected experiment first."),
+    )
+
     def mean_sink_for_prompt(prompt):
         import torch
 
@@ -1787,6 +1844,7 @@ def _(
 def _(
     clean_prompt,
     dummy_sink_tokens,
+    experiment_ready,
     load_causal_lm,
     mo,
     model_name,
@@ -1795,6 +1853,11 @@ def _(
     sink_scan_width,
     token_limit,
 ):
+    mo.stop(
+        not experiment_ready,
+        mo.md("## Optional probe B: can a prompt create a new sink?\n\nRun the selected experiment first."),
+    )
+
     def _early_position_profile(prompt):
         import torch
 
