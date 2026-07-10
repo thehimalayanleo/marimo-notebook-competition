@@ -1368,12 +1368,43 @@ def _(attentions, mo, np, pd, plt, sink_bank_size):
         _fig, _ax = plt.subplots(figsize=(9, 3.8))
         _colors = ["#4c78a8" if row["bank_size"] > 0 else "#d94f30" for _, row in _bank_df.iterrows()]
         _condition_positions = np.arange(len(_bank_df))
-        _ax.bar(_condition_positions, _bank_df["rollout_spread"], color=_colors)
-        _ax.set_title("Can a distributed sink bank replace one extreme sink?")
-        _ax.set_ylabel("Rollout spread from source token")
+        _spread_values = _bank_df["rollout_spread"].to_numpy(dtype=float)
+        _positive_spreads = _spread_values[_spread_values > 0]
+        _log_floor = max(
+            float(_positive_spreads.min()) / 10 if len(_positive_spreads) else 1e-8,
+            1e-8,
+        )
+        _plot_tops = np.maximum(_spread_values, _log_floor)
+        _bars = _ax.bar(
+            _condition_positions,
+            _plot_tops - _log_floor,
+            bottom=_log_floor,
+            color=_colors,
+        )
+        _ax.scatter(
+            _condition_positions,
+            _plot_tops,
+            color=_colors,
+            edgecolors="white",
+            linewidths=0.8,
+            zorder=3,
+        )
+        _ax.set_yscale("log")
+        _ax.set_ylim(_log_floor, max(_plot_tops) * 2.0)
+        _ax.set_title("Can a distributed sink bank replace one extreme sink? (log scale)")
+        _ax.set_ylabel("Rollout spread from source token (log scale)")
         _ax.set_xticks(_condition_positions)
         _ax.set_xticklabels(_bank_df["condition"], rotation=30, ha="right", fontsize=8)
-        _ax.grid(axis="y", alpha=0.25)
+        for _bar, _value, _top in zip(_bars, _spread_values, _plot_tops):
+            _ax.text(
+                _bar.get_x() + _bar.get_width() / 2,
+                _top * 1.12,
+                f"{_value:.3g}",
+                ha="center",
+                va="bottom",
+                fontsize=8,
+            )
+        _ax.grid(axis="y", which="both", alpha=0.25)
         _fig.tight_layout()
 
         _tradeoff_values = [
@@ -1412,6 +1443,7 @@ def _(attentions, mo, np, pd, plt, sink_bank_size):
     - Distributed bank spread at `K={sink_bank_size.value}`: **{_selected_row['rollout_spread']:.4f}**
     - Containment retained vs no-sink: **{100 * _selected_row['containment_vs_no_sink']:.1f}%**
     - Position-0 concentration reduced: **{100 * _selected_row['pos0_reduction']:.1f}%**
+    - The raw rollout chart uses a logarithmic axis so the original and distributed-bank values remain visible beside the much larger no-sink value; labels show the untransformed measurements.
     """
                 ),
                 mo.callout(
