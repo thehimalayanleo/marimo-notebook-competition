@@ -517,12 +517,15 @@ def _(attentions, mo, tokens):
     _token_count = max(len(tokens), 1)
     layer_ix = mo.ui.slider(0, max(n_layers - 1, 0), value=_best_layer, step=1, label=f"Layer (0-{max(n_layers - 1, 0)})")
     head_ix = mo.ui.slider(0, max(n_heads - 1, 0), value=_best_head, step=1, label=f"Head (0-{max(n_heads - 1, 0)})")
+    _source_min = 2 if _token_count >= 3 else 0
+    _source_max = max(_token_count - 1, _source_min)
+    _default_source = min(max(_source_min, _token_count // 3), _source_max)
     perturb_ix = mo.ui.slider(
-        0,
-        max(_token_count - 1, 0),
-        value=min(1, _token_count - 1),
+        _source_min,
+        _source_max,
+        value=_default_source,
         step=1,
-        label=f"Source token (0-{max(_token_count - 1, 0)})",
+        label=f"Source token ({_source_min}-{_source_max})",
     )
     normalize_rows = mo.ui.checkbox(value=True, label="Normalize heatmap per query token")
     mo.vstack(
@@ -861,7 +864,7 @@ def _(
         mo.md("## 2. Over-mixing under perturbation\n\nRun the selected experiment to start this analysis."),
     )
 
-    def _run_final_hidden(input_ids, attention_mask, model):
+    def _run_final_hidden(input_ids, attention_mask, model, position_ids=None):
         import torch
 
         device = next(model.parameters()).device
@@ -869,6 +872,8 @@ def _(
             "input_ids": input_ids.to(device),
             "attention_mask": attention_mask.to(device),
         }
+        if position_ids is not None:
+            _inputs["position_ids"] = position_ids.to(device)
         with torch.no_grad():
             _outputs = model(**_inputs, output_hidden_states=True)
         return _outputs.hidden_states[-1][0].float().detach().cpu().numpy()
@@ -889,7 +894,7 @@ def _(
         if _seq_len < 3:
             raise ValueError("Need at least three tokens for a meaningful perturbation comparison.")
 
-        _source = min(max(1, perturb_ix.value), _seq_len - 1)
+        _source = min(max(2, perturb_ix.value), _seq_len - 1)
         _original_id = int(_input_ids[0, _source])
         _replacement_candidates = {
             "color: blue": [" blue", " red", " green"],
@@ -911,17 +916,39 @@ def _(
         _perturbed_ids = _input_ids.clone()
         _perturbed_ids[0, _source] = _replacement_id
 
-        _with_first_base = _run_final_hidden(_input_ids, _attention_mask, model)
-        _with_first_perturbed = _run_final_hidden(_perturbed_ids, _attention_mask, model)
+        _original_positions = torch.arange(_seq_len, dtype=torch.long).unsqueeze(0)
+        _with_first_base = _run_final_hidden(
+            _input_ids,
+            _attention_mask,
+            model,
+            _original_positions,
+        )
+        _with_first_perturbed = _run_final_hidden(
+            _perturbed_ids,
+            _attention_mask,
+            model,
+            _original_positions,
+        )
         _with_first_delta = np.linalg.norm(_with_first_perturbed - _with_first_base, axis=-1)
 
         _without_first_ids = _input_ids[:, 1:].clone()
         _without_first_mask = _attention_mask[:, 1:].clone()
+        _without_first_positions = torch.arange(1, _seq_len, dtype=torch.long).unsqueeze(0)
         _without_first_perturbed_ids = _without_first_ids.clone()
         _without_source = _source - 1
         _without_first_perturbed_ids[0, _without_source] = _replacement_id
-        _without_first_base = _run_final_hidden(_without_first_ids, _without_first_mask, model)
-        _without_first_perturbed = _run_final_hidden(_without_first_perturbed_ids, _without_first_mask, model)
+        _without_first_base = _run_final_hidden(
+            _without_first_ids,
+            _without_first_mask,
+            model,
+            _without_first_positions,
+        )
+        _without_first_perturbed = _run_final_hidden(
+            _without_first_perturbed_ids,
+            _without_first_mask,
+            model,
+            _without_first_positions,
+        )
         _without_first_delta = np.linalg.norm(_without_first_perturbed - _without_first_base, axis=-1)
 
         _tokens = tokenizer.convert_ids_to_tokens(_input_ids[0].detach().cpu().tolist())
@@ -956,18 +983,23 @@ def _(
         _without_spread = float(_without_first_delta[_without_exclude].mean())
         _ratio = _without_spread / max(_with_spread, 1e-8)
         if _ratio > 1.1:
-            _takeaway = "Removing the first token makes the perturbation spread more through the final representations."
+            _takeaway = "With token positions aligned, removing the first token makes the perturbation spread more."
             _kind = "info"
         elif _ratio < 0.9:
-            _takeaway = "Removing the first token reduces perturbation spread for this prompt/model."
+            _takeaway = "With token positions aligned, removing the first token reduces perturbation spread in this run."
             _kind = "neutral"
         else:
-            _takeaway = "The final-layer perturbation spread is similar with and without the first token."
+            _takeaway = "With token positions aligned, perturbation spread is similar with and without the first token."
             _kind = "neutral"
 
         _fig, _ax = plt.subplots(figsize=(10, 3.8))
         _ax.plot(np.arange(len(_with_first_delta)), _with_first_delta, marker="o", label="with first token")
-        _ax.plot(np.arange(1, len(_tokens)), _without_first_delta, marker="o", label="remove first token")
+        _ax.plot(
+            np.arange(1, len(_tokens)),
+            _without_first_delta,
+            marker="o",
+            label="remove first token; keep position IDs",
+        )
         _ax.axvline(_source, color="#444444", linewidth=1, linestyle="--", alpha=0.7)
         _ax.set_title("Section 2: final-layer change after one token perturbation")
         _ax.set_xlabel("Token position in original prompt")
@@ -1003,7 +1035,7 @@ def _(
             _without_positions[_without_zoom_mask],
             _without_first_delta[_without_zoom_mask],
             marker="o",
-            label="remove first token",
+            label="remove first token; keep position IDs",
         )
         _zoom_ax.set_title("Perturbation spread, excluding the changed token")
         _zoom_ax.set_xlabel("Other token positions")
@@ -1014,13 +1046,13 @@ def _(
 
         perturbation_view = mo.vstack(
             [
-                mo.md("## 2. Over-mixing under perturbation"),
+                mo.md("## 2. Position-aligned first-token deletion"),
                 mo.md(
                     f"""
     - Perturbation choice: **{perturb_replacement.value}**.
     - Exact model token: position `{_source}` changes from `{_short_token(_result['original_token'])}` to `{_short_token(_result['replacement_token'])}`.
     - With first token: run the original sequence and measure final hidden-state changes.
-    - Remove first token: run the same comparison after deleting position `0`.
+    - Remove first token: delete position `0`, but give every remaining token its original position ID.
     - Mean spread away from the perturbed token: **{_with_spread:.4f}** with first token vs **{_without_spread:.4f}** without it.
     """
                 ),
@@ -1032,7 +1064,8 @@ def _(
     - Why this matters: the paper argues that sinks reduce uncontrolled mixing.
     - If the orange curve is higher across many positions, deleting the first-token sink lets the perturbation contaminate more representations.
     - The zoomed plot removes the directly changed token so the spread to other tokens is easier to see.
-    - Caveat: deleting the first token also shifts token positions. Section 2b isolates the attention route with a fixed-length counterfactual.
+    - Position IDs are held fixed, and the source is constrained away from the first two positions.
+    - Caveat: deletion still changes sequence length and the causal graph. Section 2b isolates only the attention route with a fixed-length counterfactual.
     """
                 ),
             ]

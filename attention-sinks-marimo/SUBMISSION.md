@@ -42,7 +42,7 @@ A four-position causal sink bank retained 98.0%-99.7% of the attention-rollout c
 
 *Show the perturbation plot, followed by the rollout counterfactual.*
 
-"Detection alone does not explain why the sink exists. Here I replace one token and measure how much the final hidden representations change. I compare the normal sequence with a version where the first token is removed. Because deleting a token also shifts positions, the next plot performs a cleaner fixed-length counterfactual: it removes only attention to position zero, renormalizes each row, and multiplies attention through depth. When the no-sink curve spreads farther, the first-token route is containing mixing."
+"Detection alone does not explain why the sink exists. Here I replace one token safely inside the sequence and measure how much the final hidden representations change. I compare the normal sequence with a version where the first token is removed while every remaining token keeps its original position ID. Deletion still changes the causal graph, so the next plot performs a cleaner fixed-length counterfactual: it removes only attention to position zero, renormalizes each row, and multiplies attention through depth. When the no-sink curve spreads farther, the first-token route is containing mixing."
 
 **2:55-3:25 - Context length**
 
